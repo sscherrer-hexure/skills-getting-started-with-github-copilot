@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 import threading
+from collections import defaultdict
 from pathlib import Path
 
 app = FastAPI(title="Mergington High School API",
@@ -77,8 +78,9 @@ activities = {
     }
 }
 
-# Lock to protect concurrent modifications to participants lists
-_participants_lock = threading.Lock()
+# Per-activity locks to allow concurrent access to different activities
+# while preventing races within the same activity.
+_activity_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
 
 @app.get("/")
@@ -101,13 +103,13 @@ def signup_for_activity(activity_name: str, email: str):
     # Get the specific activity
     activity = activities[activity_name]
 
-    with _participants_lock:
-        # Validate student is not already signed up
-        if email in activity["participants"]:
-            raise HTTPException(status_code=400, detail="Student already signed up for this activity")
+    with _activity_locks[activity_name]:
+        already_signed_up = email in activity["participants"]
+        if not already_signed_up:
+            activity["participants"].append(email)
 
-        # Add student
-        activity["participants"].append(email)
+    if already_signed_up:
+        raise HTTPException(status_code=400, detail="Student already signed up for this activity")
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
@@ -119,9 +121,11 @@ def unregister_from_activity(activity_name: str, email: str):
 
     activity = activities[activity_name]
 
-    with _participants_lock:
-        if email not in activity["participants"]:
-            raise HTTPException(status_code=404, detail="Participant not found in activity")
+    with _activity_locks[activity_name]:
+        participant_found = email in activity["participants"]
+        if participant_found:
+            activity["participants"].remove(email)
 
-        activity["participants"].remove(email)
+    if not participant_found:
+        raise HTTPException(status_code=404, detail="Participant not found in activity")
     return {"message": f"Unregistered {email} from {activity_name}"}
